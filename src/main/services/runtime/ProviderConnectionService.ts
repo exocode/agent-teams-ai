@@ -21,6 +21,7 @@ import type {
   CodexModelCatalogFeatureFacade,
   CodexModelCatalogRequest,
 } from '@features/codex-model-catalog/main';
+import type { KilocodeModelCatalogFeatureFacade } from '@features/kilocode-model-catalog/main';
 import type {
   CliProviderAuthMode,
   CliProviderConnectionInfo,
@@ -62,12 +63,18 @@ const PROVIDER_CAPABILITIES: Record<
     supportsApiKey: false,
     configurableAuthModes: [],
   },
+  kilocode: {
+    supportsOAuth: false,
+    supportsApiKey: true,
+    configurableAuthModes: ['api_key'],
+  },
 };
 
 const PROVIDER_API_KEY_ENV_VARS: Partial<Record<CliProviderId, string>> = {
   anthropic: 'ANTHROPIC_API_KEY',
   codex: 'OPENAI_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  kilocode: 'KILO_API_KEY',
 };
 
 const CODEX_NATIVE_API_KEY_ENV_VAR = 'CODEX_API_KEY';
@@ -193,6 +200,10 @@ export class ProviderConnectionService {
   private codexAccountFeature: Pick<CodexAccountFeatureFacade, 'getSnapshot'> | null = null;
   private codexModelCatalogFeature: Pick<CodexModelCatalogFeatureFacade, 'getCatalog'> | null =
     null;
+  private kilocodeModelCatalogFeature: Pick<
+    KilocodeModelCatalogFeatureFacade,
+    'getCatalog'
+  > | null = null;
 
   constructor(
     private apiKeyService = new ApiKeyService(),
@@ -213,6 +224,12 @@ export class ProviderConnectionService {
     feature: Pick<CodexModelCatalogFeatureFacade, 'getCatalog'> | null
   ): void {
     this.codexModelCatalogFeature = feature;
+  }
+
+  setKilocodeModelCatalogFeature(
+    feature: Pick<KilocodeModelCatalogFeatureFacade, 'getCatalog'> | null
+  ): void {
+    this.kilocodeModelCatalogFeature = feature;
   }
 
   async getCodexModelCatalog(
@@ -590,6 +607,10 @@ export class ProviderConnectionService {
       return this.enrichAnthropicProviderStatus(withConnection);
     }
 
+    if (provider.providerId === 'kilocode') {
+      return this.enrichKilocodeProviderStatus(withConnection);
+    }
+
     if (provider.providerId !== 'codex') {
       return withConnection;
     }
@@ -644,6 +665,31 @@ export class ProviderConnectionService {
       };
     } catch {
       return withConnection;
+    }
+  }
+
+  private async enrichKilocodeProviderStatus(
+    provider: CliProviderStatus
+  ): Promise<CliProviderStatus> {
+    if (!this.kilocodeModelCatalogFeature || !provider.connection?.apiKeyConfigured) {
+      return provider;
+    }
+    try {
+      const catalog = await this.kilocodeModelCatalogFeature.getCatalog();
+      if (catalog.status === 'unavailable' || catalog.models.length === 0) {
+        return provider;
+      }
+      const models = catalog.models
+        .filter((m) => !m.hidden)
+        .map((m) => m.launchModel.trim())
+        .filter(Boolean);
+      return {
+        ...provider,
+        models: models.length > 0 ? models : provider.models,
+        modelCatalog: catalog,
+      };
+    } catch {
+      return provider;
     }
   }
 

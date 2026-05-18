@@ -236,6 +236,8 @@ function getProviderDisplayName(providerId: CliProviderId): string {
       return 'Gemini';
     case 'opencode':
       return 'OpenCode (75+ LLM providers)';
+    case 'kilocode':
+      return 'KiloCode';
   }
 }
 
@@ -488,7 +490,11 @@ export const createCliInstallerSlice: StateCreator<AppState, [], [], CliInstalle
           };
         });
         if (status.installed) {
+          const bridgeManagedIds = new Set<string>(MULTIMODEL_PROVIDER_IDS);
           for (const provider of status.providers) {
+            if (!bridgeManagedIds.has(provider.providerId)) {
+              continue;
+            }
             void get().fetchCliProviderStatus(provider.providerId, {
               silent: true,
               epoch,
