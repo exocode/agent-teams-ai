@@ -44,6 +44,7 @@ import {
   type ProviderModelAvailabilityContext,
   type ProviderModelAvailabilitySnapshot,
 } from '../runtime/CliProviderModelAvailabilityService';
+import { providerConnectionService } from '../runtime/ProviderConnectionService';
 import { ClaudeBinaryResolver } from '../team/ClaudeBinaryResolver';
 import { getCliFlavorUiOptions, getConfiguredCliFlavor } from '../team/cliFlavor';
 
@@ -503,6 +504,10 @@ export class CliInstallerService {
                 providerId: 'opencode',
                 displayName: 'OpenCode (75+ LLM providers)',
               },
+              {
+                providerId: 'kilocode',
+                displayName: 'KiloCode',
+              },
             ] as const
           ).map((provider) => ({
             ...provider,
@@ -726,6 +731,10 @@ export class CliInstallerService {
   async getProviderStatus(providerId: CliProviderId): Promise<CliProviderStatus | null> {
     await resolveInteractiveShellEnv();
 
+    if (providerId === 'kilocode') {
+      return this.resolveKilocodeProviderStatus();
+    }
+
     const binaryPath = await ClaudeBinaryResolver.resolve();
     if (!binaryPath) {
       return null;
@@ -752,6 +761,10 @@ export class CliInstallerService {
 
   async verifyProviderModels(providerId: CliProviderId): Promise<CliProviderStatus | null> {
     await resolveInteractiveShellEnv();
+
+    if (providerId === 'kilocode') {
+      return this.resolveKilocodeProviderStatus();
+    }
 
     const binaryPath = await ClaudeBinaryResolver.resolve();
     if (!binaryPath) {
@@ -962,6 +975,53 @@ export class CliInstallerService {
     result.authMethod = null;
   }
 
+  private async resolveKilocodeProviderStatus(): Promise<CliProviderStatus> {
+    const baseStatus: CliProviderStatus = {
+      providerId: 'kilocode',
+      displayName: 'KiloCode',
+      supported: false,
+      authenticated: false,
+      authMethod: null,
+      verificationState: 'verified',
+      modelVerificationState: 'idle',
+      statusMessage: null,
+      detailMessage: null,
+      models: [],
+      modelAvailability: [],
+      canLoginFromUi: true,
+      capabilities: {
+        teamLaunch: false,
+        oneShot: false,
+        extensions: createDefaultCliExtensionCapabilities(),
+      },
+      selectedBackendId: null,
+      resolvedBackendId: null,
+      availableBackends: [],
+      externalRuntimeDiagnostics: [],
+      backend: null,
+      connection: null,
+      modelCatalog: null,
+      runtimeCapabilities: null,
+      subscriptionRateLimits: null,
+    };
+    // enrichProviderStatus checks both the app key store and process.env for KILO_API_KEY
+    const enriched = await providerConnectionService.enrichProviderStatus(baseStatus);
+    const hasApiKey = Boolean(enriched.connection?.apiKeyConfigured);
+    const status: CliProviderStatus = {
+      ...enriched,
+      supported: hasApiKey,
+      authenticated: hasApiKey,
+      authMethod: hasApiKey ? 'api_key' : null,
+      statusMessage: hasApiKey ? null : 'Configure KILO_API_KEY to use KiloCode.',
+      capabilities: {
+        ...enriched.capabilities,
+        teamLaunch: hasApiKey,
+      },
+    };
+    this.updateLatestProviderStatus(status);
+    return status;
+  }
+
   /**
    * Check auth status with retry — covers stale lock files after Ctrl+C interruption.
    * Wrapped in its own timeout to prevent slow auth from blocking the overall status.
@@ -975,21 +1035,38 @@ export class CliInstallerService {
   ): Promise<void> {
     if (result.flavor === 'agent_teams_orchestrator') {
       result.authStatusChecking = true;
+      const mergeWithNonBridgeProviders = async (
+        bridgeProviders: CliProviderStatus[]
+      ): Promise<CliProviderStatus[]> => {
+        const bridgeIds = new Set(bridgeProviders.map((p) => p.providerId));
+        const nonBridgeStatuses = await Promise.all(
+          result.providers
+            .filter((p) => !bridgeIds.has(p.providerId))
+            .map((p) =>
+              p.providerId === 'kilocode'
+                ? this.resolveKilocodeProviderStatus()
+                : Promise.resolve(p)
+            )
+        );
+        return [...bridgeProviders, ...nonBridgeStatuses];
+      };
       try {
         const providers = await this.multimodelBridgeService.getProviderStatuses(
           binaryPath,
           (providersSnapshot) => {
-            result.providers = providersSnapshot;
-            result.authLoggedIn = providersSnapshot.some((provider) => provider.authenticated);
-            result.authMethod =
-              providersSnapshot.find((provider) => provider.authenticated)?.authMethod ?? null;
-            this.publishStatusSnapshot(result);
+            mergeWithNonBridgeProviders(providersSnapshot).then((merged) => {
+              result.providers = merged;
+              result.authLoggedIn = merged.some((provider) => provider.authenticated);
+              result.authMethod =
+                merged.find((provider) => provider.authenticated)?.authMethod ?? null;
+              this.publishStatusSnapshot(result);
+            });
           }
         );
-        result.providers = providers;
-        result.authLoggedIn = providers.some((provider) => provider.authenticated);
-        result.authMethod =
-          providers.find((provider) => provider.authenticated)?.authMethod ?? null;
+        const merged = await mergeWithNonBridgeProviders(providers);
+        result.providers = merged;
+        result.authLoggedIn = merged.some((provider) => provider.authenticated);
+        result.authMethod = merged.find((provider) => provider.authenticated)?.authMethod ?? null;
         result.authStatusChecking = false;
         this.publishStatusSnapshot(result);
       } catch (error) {
